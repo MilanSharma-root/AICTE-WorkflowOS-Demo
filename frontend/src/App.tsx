@@ -71,9 +71,31 @@ function demoResponse<T>(path:string, token:string, init:RequestInit={}):T {
  if(path.startsWith("/api/v1/applications")&&method==="GET")return state.apps as T;
  if(path==="/api/v1/applications"&&method==="POST"){const id=Math.max(0,...state.apps.map(a=>a.id))+1;const a={id,application_no:`SYN-2026-${String(id+100).padStart(4,"0")}`,institution_name:body.institution_name||"New demo institution",institution_type:body.institution_type||"Technical Institution",state:body.state||"Uttar Pradesh",application_type:body.application_type||"New Institution",current_stage:state.stages[0],status:"Pending",priority:body.priority||"Normal",assigned_to:"Document Screening",submitted_at:new Date().toISOString(),due_date:body.due_date||null,notes:body.notes||""};state.apps.unshift(a);state.audit.unshift({id:state.audit.length+1,application_id:id,action:"Application created",actor:user.full_name,details:a.application_no,created_at:new Date().toISOString()});demoSave(state);return a as T;}
  const transition=path.match(/^\/api\/v1\/applications\/(\d+)\/transition$/);if(transition&&method==="POST"){const a=state.apps.find(a=>a.id===Number(transition[1]));if(a){const from=a.current_stage;a.current_stage=String(body.to_stage||a.current_stage);a.status=String(body.status||a.status);a.assigned_to=a.current_stage===state.stages[0]?"Document Screening":a.current_stage==="Scrutiny"?"Scrutiny Officer":a.current_stage==="EVC Scheduling"?"EVC Officer":a.current_stage==="SAC/SHC Review"?"SAC/SHC Officer":a.current_stage==="Compliance"?"Compliance Officer":"Final Approval Officer";state.audit.unshift({id:state.audit.length+1,application_id:a.id,action:"Workflow transition",actor:user.full_name,details:`${from} → ${a.current_stage}: ${body.note||""}`,created_at:new Date().toISOString()});demoSave(state);}return {ok:true} as T;}
+ if(path==="/api/v1/compliance/automation/last-run"&&method==="GET")return ((state as any).complianceLastRun||null) as T;
+ if(path==="/api/v1/compliance/automation/run"&&method==="POST"){
+  const started=new Date().toISOString();let created=0,updated=0,skipped=0;const issues:any[]=[];const errors:string[]=[];const warnings=["Demo mode: scan checks application and compliance metadata only; it does not inspect uploaded file contents or send external email."];
+  const addFinding=(app:any,title:string,category:string,detail:string,due_date?:string|null)=>{
+   issues.push({application_id:app.id,application_no:app.application_no,institution_name:app.institution_name,requirement:title,category,detail});
+   const existing=state.compliance.find((c:any)=>c.application_id===app.id&&String(c.title||"").toLowerCase()===title.toLowerCase()&&c.status!=="Verified");
+   if(existing){Object.assign(existing,{category,notes:detail,due_date:due_date||existing.due_date||null,assigned_to:existing.assigned_to||"Compliance Officer",updated_at:new Date().toISOString()});updated++;}
+   else{state.compliance.push({id:Math.max(0,...state.compliance.map((c:any)=>Number(c.id)||0))+1,application_id:app.id,application_no:app.application_no,institution_name:app.institution_name,title,category,due_date:due_date||null,status:"Pending",assigned_to:"Compliance Officer",notes:detail,created_at:new Date().toISOString(),updated_at:new Date().toISOString()});created++;}
+  };
+  for(const app of state.apps){
+   if(["Completed","Rejected","Approved"].includes(String(app.status))){skipped++;continue;}
+   if(app.due_date&&new Date(app.due_date)<new Date())addFinding(app,"Application deadline overdue","Deadline","Application due date has passed.",app.due_date);
+   if(["Returned","Needs Correction","Non-Compliant"].includes(String(app.status)))addFinding(app,"Application correction required","Document Verification","Application status indicates that a correction or re-check is needed.",app.due_date||null);
+   if(app.current_stage==="Compliance")addFinding(app,"Stage compliance review pending","Approval Condition","Application is at the Compliance stage and requires officer review.",app.due_date||null);
+  }
+  for(const u of state.undertakings){if(u.due_date&&new Date(u.due_date)<new Date()&&!u.submitted){const app=state.apps.find((a:any)=>a.id===Number(u.application_id));if(app)addFinding(app,"Undertaking overdue: "+(u.title||"Required undertaking"),"Undertaking","Required undertaking has passed its due date and is not marked submitted.",u.due_date);}}
+  const now=new Date().toISOString();const result={run_id:"demo-"+Date.now(),status:"Completed",started_at:started,completed_at:now,applications_scanned:state.apps.length,documents_checked:state.documents.length,issues_detected:issues.length,tasks_created:created,tasks_updated:updated,tasks_skipped:skipped,alerts_created:0,errors,warnings,issues};
+  (state as any).complianceLastRun=result;
+  state.audit.unshift({id:Math.max(0,...state.audit.map((a:any)=>Number(a.id)||0))+1,action:"Compliance automation run",actor:user.full_name,details:JSON.stringify({scanned:state.apps.length,issues:issues.length,created,updated}),created_at:now});
+  demoSave(state);return result as T;
+ }
  if(path==="/api/v1/compliance"&&method==="GET")return state.compliance as T;
  if(path==="/api/v1/compliance"&&method==="POST"){const row={id:Math.max(0,...state.compliance.map(a=>a.id))+1,application_id:Number(body.application_id),...body,status:"Pending"};const a=state.apps.find(a=>a.id===row.application_id);row.application_no=a?.application_no;row.institution_name=a?.institution_name;state.compliance.push(row);demoSave(state);return row as T;}
- const comp=path.match(/^\/api\/v1\/compliance\/(\d+)/);if(comp&&method==="PATCH"){const row=state.compliance.find(a=>a.id===Number(comp[1]));if(row)Object.assign(row,body);demoSave(state);return row as T;}
+ const correction=path.match(/^\\/api\\/v1\\/compliance\\/(\\d+)\\/send-correction-email$/);if(correction&&method==="POST"){const row=state.compliance.find(a=>a.id===Number(correction[1]));if(row){state.audit.unshift({id:Math.max(0,...state.audit.map((a:any)=>Number(a.id)||0))+1,application_id:row.application_id,action:"Correction email drafted (demo only)",actor:user.full_name,details:"To: "+String(body.to||"")+". External email was not sent.",created_at:new Date().toISOString()});demoSave(state);}return {sent:false,message:"Demo mode cannot send real email. The correction request was recorded locally."} as T;}
+ const comp=path.match(/^\\/api\\/v1\\/compliance\\/(\\d+)/);if(comp&&method==="PATCH"){const row=state.compliance.find(a=>a.id===Number(comp[1]));if(row)Object.assign(row,body);demoSave(state);return row as T;}
  if(path==="/api/v1/evc"&&method==="GET")return state.evc as T;
  if(path==="/api/v1/evc"&&method==="POST"){const a=state.apps.find(a=>a.id===Number(body.application_id));const row={id:Math.max(0,...state.evc.map(a=>a.id))+1,...body,status:"Proposed",application_no:a?.application_no,institution_name:a?.institution_name};state.evc.push(row);demoSave(state);return row as T;}
  const evc=path.match(/^\/api\/v1\/evc\/(\d+)/);if(evc&&method==="PATCH"){const row=state.evc.find(a=>a.id===Number(evc[1]));if(row)Object.assign(row,body);demoSave(state);return row as T;}
@@ -374,9 +396,9 @@ export default function App(){
   if(!window.confirm("Send this correction email to "+recipient+"?"))return;
   setCorrectionEmailBusy(true);
   try{
-   await request<{sent:boolean;message:string}>("/api/v1/compliance/"+complianceReview.item.id+"/send-correction-email",token,{method:"POST",body:JSON.stringify({to:recipient,subject,body})});
+   const delivery=await request<{sent:boolean;message:string}>("/api/v1/compliance/"+complianceReview.item.id+"/send-correction-email",token,{method:"POST",body:JSON.stringify({to:recipient,subject,body})});
+   if(!delivery.sent){notify(delivery.message||"Demo mode: email was not sent; correction request was recorded locally.");return;}
    notify("Correction email sent to "+recipient);
-   setCorrectionEmailBusy(false);
    await request<Compliance>("/api/v1/compliance/"+complianceReview.item.id,token,{method:"PATCH",body:JSON.stringify({status:"Non-Compliant",notes:"Correction email sent to "+recipient+": "+complianceReview.notes.trim(),due_date:complianceReview.due_date||null,assigned_to:complianceReview.assigned_to.trim()||null})});
    setComplianceReview(null);setCollegeEmail("");setCorrectionEmailSubject("");setCorrectionEmailBody("");await loadAll();
   }catch(err){notify(err instanceof Error?err.message:"Could not send correction email");}
